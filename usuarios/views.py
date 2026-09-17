@@ -29,6 +29,7 @@ from .serializers import (
     SolicitarOlvidePasswordSerializer,
     SolicitarResetPasswordSerializer,
 )
+from empresas.serializers import EmpresaSerializer
 from core.brevo import send_brevo_transactional_email
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -40,7 +41,7 @@ def _build_password_reset_link(user):
     base_url = getattr(settings, 'PASSWORD_RESET_FRONTEND_URL', '').strip()
 
     if not base_url:
-        base_url = 'http://localhost:4200/olvide-password'
+        base_url = 'https://www.exprofire.com//olvide-password'
 
     separator = '&' if '?' in base_url else '?'
     query = urlencode({'uid': uid, 'token': token})
@@ -51,6 +52,13 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
         perfil = getattr(self.user, 'perfil', None)
+        empresa = perfil.empresa if perfil and perfil.empresa else None
+        empresa_data = None
+        if empresa:
+            empresa_data = EmpresaSerializer(
+                empresa,
+                context=self.context,
+            ).data
 
         data['requiere_cambio_password'] = bool(
             perfil and perfil.requiere_cambio_password
@@ -61,6 +69,8 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'email': self.user.email,
             'rol': perfil.rol if perfil else None,
             'empresa_id': perfil.empresa_id if perfil else None,
+            'empresa': empresa_data,
+            'logo_empresa_url': empresa_data['logo_url'] if empresa_data else None,
         }
         return data
 

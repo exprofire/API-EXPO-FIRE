@@ -1,5 +1,7 @@
 from datetime import date, timedelta
+from unittest.mock import patch
 
+from django.test import override_settings
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -22,6 +24,7 @@ class RevisionExtintorTest(TestCase):
             empresa=self.empresa,
         )
 
+    @override_settings(UIPC_PDF_RECIPIENTS=[])
     def test_crea_revision_desde_payload(self):
         payload = {
             'tipo_servicio': 'uipc',
@@ -66,3 +69,35 @@ class RevisionExtintorTest(TestCase):
         expected_next = self.extintor._sumar_meses(date.today(), 1)
         self.assertEqual(self.extintor.ultima_revision, date.today())
         self.assertEqual(self.extintor.proxima_revision, expected_next)
+
+    @override_settings(
+        UIPC_PDF_RECIPIENTS=['destino@example.com'],
+        BREVO_SENDER_EMAIL='exprofirextintores@gmail.com',
+        BREVO_SENDER_NAME='Expro Fire',
+    )
+    @patch('extintores.views.send_brevo_transactional_email')
+    def test_envia_revision_por_brevo_con_pdf(self, send_email):
+        send_email.return_value = {
+            'ok': True,
+            'status_code': 201,
+            'data': {'messageId': '<test-message>'},
+            'error': None,
+        }
+        response = self.client.post(
+            f'/extintores/{self.extintor.id}/revisiones/',
+            {
+                'tipo_servicio': 'uipc',
+                'estado': 'completado',
+                'respuestas_json': {},
+                'observaciones_por_item': {},
+            },
+            format='json',
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(response.data['correo_pdf']['enviado'])
+        send_email.assert_called_once()
+        call = send_email.call_args.kwargs
+        self.assertEqual(call['to_emails'], ['destino@example.com'])
+        self.assertEqual(call['attachments'][0]['name'].endswith('.pdf'), True)
+        self.assertTrue(call['attachments'][0]['content'])
