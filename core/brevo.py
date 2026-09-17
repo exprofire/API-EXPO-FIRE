@@ -1,3 +1,4 @@
+import base64
 import json
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -20,6 +21,7 @@ def send_brevo_transactional_email(
     reply_to=None,
     tags=None,
     params=None,
+    attachments=None,
     timeout=10,
 ):
     """
@@ -87,6 +89,14 @@ def send_brevo_transactional_email(
         payload['tags'] = list(tags)
     if params:
         payload['params'] = params
+    if attachments:
+        payload['attachment'] = [
+            {
+                'name': attachment['name'],
+                'content': base64.b64encode(attachment['content']).decode('ascii'),
+            }
+            for attachment in attachments
+        ]
 
     request = Request(
         BREVO_TRANSAC_EMAIL_URL,

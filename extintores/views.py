@@ -10,13 +10,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.conf import settings
-from django.core.mail import EmailMessage
 from django.http import Http404, HttpResponse
 from django.db.models import Q
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile, ZIP_DEFLATED
 from PIL import Image
+from core.brevo import send_brevo_transactional_email
 from .models import Extintor
 from empresas.models import Empresa
 from usuarios.models import Perfil
@@ -259,23 +259,30 @@ class ExtintorViewSet(viewsets.ModelViewSet):
             try:
                 with revision.pdf_uipc.open('rb') as pdf_file:
                     attachment_bytes = pdf_file.read()
-                email = EmailMessage(
+                email_result = send_brevo_transactional_email(
                     subject=f'UIPC generada - {extintor.codigo}',
-                    body=(
+                    text_content=(
                         f'Se generó una nueva UIPC para el extintor {extintor.codigo}.\n'
                         f'Folio: {revision.id.hex[:8].upper()}\n'
                         f'Fecha: {revision.creado_en.strftime("%d/%m/%Y %H:%M") if revision.creado_en else ""}'
                     ),
-                    from_email=getattr(settings, 'DEFAULT_FROM_EMAIL', 'webmaster@localhost'),
-                    to=destinatarios,
+                    to_emails=destinatarios,
+                    sender_email=getattr(settings, 'BREVO_SENDER_EMAIL', ''),
+                    sender_name=getattr(settings, 'BREVO_SENDER_NAME', ''),
+                    attachments=[
+                        {
+                            'name': Path(revision.pdf_uipc.name).name,
+                            'content': attachment_bytes,
+                        }
+                    ],
+                    timeout=getattr(settings, 'EMAIL_TIMEOUT', 10),
                 )
-                email.attach(
-                    Path(revision.pdf_uipc.name).name,
-                    attachment_bytes,
-                    'application/pdf',
-                )
-                email.send(fail_silently=False)
-                email_status = {'enviado': True, 'destinatarios': destinatarios}
+                email_status = {
+                    'enviado': email_result['ok'],
+                    'destinatarios': destinatarios,
+                }
+                if not email_result['ok']:
+                    email_status['error'] = email_result['error']
             except Exception as exc:
                 email_status = {'enviado': False, 'error': str(exc), 'destinatarios': destinatarios}
 
