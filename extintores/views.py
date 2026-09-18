@@ -5,6 +5,8 @@ Vistas de la API REST para extintores.
 Este módulo define los ViewSets que manejan las peticiones HTTP
 para la gestión de extintores.
 """
+import logging
+
 from rest_framework import viewsets, filters, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -27,6 +29,9 @@ from .serializers import (
     ExtintorCreateSerializer,
     RevisionExtintorSerializer,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class ExtintorViewSet(viewsets.ModelViewSet):
@@ -281,10 +286,18 @@ class ExtintorViewSet(viewsets.ModelViewSet):
                     'enviado': email_result['ok'],
                     'destinatarios': destinatarios,
                 }
+                logger.info(
+                    'Resultado envío UIPC por Brevo: enviado=%s status_code=%s destinatarios=%s',
+                    email_result['ok'],
+                    email_result['status_code'],
+                    destinatarios,
+                )
                 if not email_result['ok']:
                     email_status['error'] = email_result['error']
+                    logger.error('Error Brevo enviando UIPC: %s', email_result['error'])
             except Exception as exc:
                 email_status = {'enviado': False, 'error': str(exc), 'destinatarios': destinatarios}
+                logger.exception('Excepción enviando UIPC por Brevo: %s', exc)
 
         response_data = read_serializer.data
         response_data['correo_pdf'] = email_status
