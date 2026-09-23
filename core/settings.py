@@ -62,7 +62,10 @@ LEADS_TO_EMAIL = [
 ]
 UIPC_PDF_RECIPIENTS = [
     email.strip()
-    for email in os.getenv('UIPC_PDF_RECIPIENTS', 'anayajhaz18@gmail.com').split(',')
+    for email in os.getenv(
+        'UIPC_PDF_RECIPIENTS',
+        'anayajhaz18@gmail.com,exprofirextintores@gmail.com',
+    ).split(',')
     if email.strip()
 ]
 AWS_ACCESS_KEY_ID = os.getenv('AWS_ACCESS_KEY_ID', '')
