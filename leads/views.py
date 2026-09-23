@@ -2,7 +2,7 @@ import json
 import logging
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 from django.conf import settings
 from django.utils import timezone
@@ -94,6 +94,17 @@ class LeadCreateView(APIView):
         try:
             with urlopen(request, timeout=8) as response:
                 return json.loads(response.read().decode('utf-8'))
+        except HTTPError as exc:
+            body = exc.read().decode('utf-8', errors='replace') if exc.fp else ''
+            logger.error(
+                'Cloudflare rechazó siteverify con HTTP %s: %s',
+                exc.code,
+                body,
+            )
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError:
+                return {'success': False, 'error-codes': ['siteverify-http-error']}
         except (URLError, TimeoutError, json.JSONDecodeError) as exc:
             logger.exception('Error verificando Turnstile con Cloudflare: %s', exc)
             return {'success': False, 'error-codes': ['siteverify-unavailable']}
