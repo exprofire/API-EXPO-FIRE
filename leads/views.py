@@ -94,7 +94,8 @@ class LeadCreateView(APIView):
         try:
             with urlopen(request, timeout=8) as response:
                 return json.loads(response.read().decode('utf-8'))
-        except (URLError, TimeoutError, json.JSONDecodeError):
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            logger.exception('Error verificando Turnstile con Cloudflare: %s', exc)
             return {'success': False, 'error-codes': ['siteverify-unavailable']}
 
     def _get_client_ip(self, request):
