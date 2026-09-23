@@ -55,6 +55,10 @@ PASSWORD_RESET_FRONTEND_URL = os.getenv(
     'PASSWORD_RESET_FRONTEND_URL',
     'https://www.exprofire.com/olvide-password',
 )
+NEW_USER_PASSWORD_FRONTEND_URL = os.getenv(
+    'NEW_USER_PASSWORD_FRONTEND_URL',
+    'https://www.exprofire.com/crear-password',
+)
 LEADS_TO_EMAIL = [
     email.strip()
     for email in os.getenv('LEADS_TO_EMAIL', 'anayajhaz18@gmail.com').split(',')

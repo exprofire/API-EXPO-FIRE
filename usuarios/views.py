@@ -35,10 +35,10 @@ User = get_user_model()
 logger = logging.getLogger(__name__)
 
 
-def _build_password_reset_link(user):
+def _build_password_reset_link(user, base_url=None):
     uid = urlsafe_base64_encode(force_bytes(user.pk))
     token = default_token_generator.make_token(user)
-    base_url = getattr(settings, 'PASSWORD_RESET_FRONTEND_URL', '').strip()
+    base_url = (base_url or getattr(settings, 'PASSWORD_RESET_FRONTEND_URL', '')).strip()
 
     if not base_url:
         base_url = 'https://www.exprofire.com//olvide-password'
@@ -292,7 +292,14 @@ class PerfilViewSet(viewsets.ModelViewSet):
         perfil.save(update_fields=['requiere_cambio_password', 'updated_at'])
 
         user = perfil.user
-        reset_link = _build_password_reset_link(user)
+        reset_link = _build_password_reset_link(
+            user,
+            getattr(
+                settings,
+                'NEW_USER_PASSWORD_FRONTEND_URL',
+                'https://www.exprofire.com/crear-password',
+            ),
+        )
         email_result = send_brevo_transactional_email(
             to_email=user.email,
             subject='Bienvenido a Expro Fire',
