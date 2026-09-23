@@ -1,4 +1,5 @@
 import json
+import logging
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from urllib.error import URLError
@@ -16,6 +17,7 @@ from core.brevo import send_brevo_transactional_email
 
 
 TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify'
+logger = logging.getLogger(__name__)
 
 
 class LeadCreateView(APIView):
@@ -66,6 +68,11 @@ class LeadCreateView(APIView):
 
     def _verify_turnstile(self, token, remote_ip=None):
         secret = getattr(settings, 'TURNSTILE_SECRET_KEY', '')
+        logger.warning(
+            'Turnstile configurado=%s longitud=%s',
+            bool(secret),
+            len(secret),
+        )
         if not secret:
             return {'success': False, 'error-codes': ['missing-secret-key']}
 

@@ -288,9 +288,46 @@ class PerfilViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         perfil = serializer.save()
+        perfil.requiere_cambio_password = True
+        perfil.save(update_fields=['requiere_cambio_password', 'updated_at'])
+
+        user = perfil.user
+        reset_link = _build_password_reset_link(user)
+        email_result = send_brevo_transactional_email(
+            to_email=user.email,
+            subject='Bienvenido a Expro Fire',
+            text_content=(
+                f'Hola {user.get_full_name() or user.username},\n\n'
+                'Tu acceso a Expro Fire fue creado correctamente.\n\n'
+                f'Usuario: {user.username}\n\n'
+                'Para establecer tu contraseña, abre este enlace:\n'
+                f'{reset_link}\n\n'
+                'Por seguridad, el enlace es personal y temporal.'
+            ),
+            html_content=(
+                f'<p>Hola {user.get_full_name() or user.username},</p>'
+                '<p>Tu acceso a Expro Fire fue creado correctamente.</p>'
+                f'<p><strong>Usuario:</strong> {user.username}</p>'
+                f'<p><a href="{reset_link}">Establecer mi contraseña</a></p>'
+                '<p>Por seguridad, el enlace es personal y temporal.</p>'
+            ),
+        )
+        correo_bienvenida = {
+            'enviado': email_result['ok'],
+            'destinatario': user.email,
+        }
+        if not email_result['ok']:
+            correo_bienvenida['error'] = email_result['error']
+            logger.error(
+                'Error enviando bienvenida a nuevo usuario %s: %s',
+                user.username,
+                email_result['error'],
+            )
         read_serializer = PerfilSerializer(perfil, context=self.get_serializer_context())
+        response_data = read_serializer.data
+        response_data['correo_bienvenida'] = correo_bienvenida
         headers = self.get_success_headers(read_serializer.data)
-        return Response(read_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
 
     @action(detail=True, methods=['post'], url_path='solicitar-reset-password')
     def solicitar_reset_password(self, request, pk=None):
