@@ -48,6 +48,48 @@ def _build_password_reset_link(user, base_url=None):
     return f"{base_url}{separator}{query}"
 
 
+def _send_welcome_email(user):
+    reset_link = _build_password_reset_link(
+        user,
+        getattr(
+            settings,
+            'NEW_USER_PASSWORD_FRONTEND_URL',
+            'https://www.exprofire.com/crear-password',
+        ),
+    )
+    result = send_brevo_transactional_email(
+        to_email=user.email,
+        subject='Bienvenido a Expro Fire',
+        text_content=(
+            f'Hola {user.get_full_name() or user.username},\n\n'
+            'Tu acceso a Expro Fire fue creado correctamente.\n\n'
+            f'Usuario: {user.username}\n\n'
+            'Para establecer tu contraseña, abre este enlace:\n'
+            f'{reset_link}\n\n'
+            'Por seguridad, el enlace es personal y temporal.'
+        ),
+        html_content=(
+            f'<p>Hola {user.get_full_name() or user.username},</p>'
+            '<p>Tu acceso a Expro Fire fue creado correctamente.</p>'
+            f'<p><strong>Usuario:</strong> {user.username}</p>'
+            f'<p><a href="{reset_link}">Establecer mi contraseña</a></p>'
+            '<p>Por seguridad, el enlace es personal y temporal.</p>'
+        ),
+    )
+    status_data = {
+        'enviado': result['ok'],
+        'destinatario': user.email,
+    }
+    if not result['ok']:
+        status_data['error'] = result['error']
+        logger.error(
+            'Error enviando bienvenida a nuevo usuario %s: %s',
+            user.username,
+            result['error'],
+        )
+    return status_data
+
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def validate(self, attrs):
         data = super().validate(attrs)
@@ -335,6 +377,25 @@ class PerfilViewSet(viewsets.ModelViewSet):
         response_data['correo_bienvenida'] = correo_bienvenida
         headers = self.get_success_headers(read_serializer.data)
         return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(detail=True, methods=['post'], url_path='reenviar-bienvenida')
+    def reenviar_bienvenida(self, request, pk=None):
+        perfil_objetivo = self.get_object()
+        if not self._puede_gestionar_usuario(request.user, perfil_objetivo):
+            return Response(
+                {'detail': 'No tienes permiso para reenviar esta bienvenida.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        perfil_objetivo.requiere_cambio_password = True
+        perfil_objetivo.save(update_fields=['requiere_cambio_password', 'updated_at'])
+        correo_bienvenida = _send_welcome_email(perfil_objetivo.user)
+
+        return Response({
+            'detail': 'Correo de bienvenida reenviado.',
+            'usuario_id': perfil_objetivo.user_id,
+            'correo_bienvenida': correo_bienvenida,
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='solicitar-reset-password')
     def solicitar_reset_password(self, request, pk=None):
