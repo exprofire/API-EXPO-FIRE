@@ -6,10 +6,115 @@ Este módulo define los serializadores de Django REST Framework
 que convierten los modelos en JSON y viceversa.
 """
 from rest_framework import serializers
+import re
+import unicodedata
 from .models import Extintor, RevisionExtintor
 from empresas.models import Empresa
 from empresas.serializers import EmpresaSerializer
 from usuarios.models import Perfil
+
+
+def normalizar_modalidad(valor):
+    """Normaliza modalidades con o sin acento y en cualquier combinación Unicode."""
+    texto = '' if valor is None else str(valor)
+    texto = unicodedata.normalize('NFKD', texto)
+    texto = ''.join(caracter for caracter in texto if not unicodedata.combining(caracter))
+    return texto.strip().lower()
+
+
+class CargaMasivaFilaSerializer(serializers.Serializer):
+    """Valida una fila normalizada de la carga masiva de extintores."""
+
+    codigo = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    ubicacion = serializers.CharField(max_length=200, required=False, allow_blank=True)
+    tipo = serializers.CharField(required=False, allow_blank=True)
+    modalidad = serializers.CharField(required=False, allow_blank=True)
+    capacidad = serializers.CharField(max_length=50, required=False, allow_blank=True)
+    fecha_fabricacion = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
+    ultima_revision = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
+    fecha_vencimiento = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
+    proxima_revision = serializers.DateField(required=False, allow_null=True, input_formats=['%Y-%m-%d'])
+
+    def validate_codigo(self, value):
+        """Evita espacios accidentales al inicio o al final del código."""
+        return value.strip()
+
+    def validate_ubicacion(self, value):
+        """Normaliza espacios de la ubicación sin alterar su contenido."""
+        return value.strip()
+
+    def validate_tipo(self, value):
+        """Normaliza el agente y verifica las choices del modelo."""
+        import re
+
+        tipo = re.sub(r'[\s-]+', '_', value.strip().upper())
+        opciones_validas = [valor for valor, _etiqueta in Extintor.AGENTE_CHOICES]
+        if tipo not in opciones_validas:
+            opciones = ', '.join(opciones_validas)
+            raise serializers.ValidationError(
+                f'Agente no válido. Opciones válidas: {opciones}.'
+            )
+        return tipo
+
+    def validate_modalidad(self, value):
+        """Normaliza y valida la modalidad con un mensaje de negocio claro."""
+        modalidad = normalizar_modalidad(value)
+        equivalencias = {
+            'portatil': 'portatil',
+            'movil': 'movil',
+        }
+        if modalidad not in equivalencias:
+            raise serializers.ValidationError(
+                'Modalidad no válida. Opciones válidas: Portátil, Móvil.'
+            )
+        return equivalencias[modalidad]
+
+    def validate_capacidad(self, value):
+        """Valida capacidad como número seguido de kg o L."""
+        valor = value.strip()
+        if not re.fullmatch(r'\d+(?:[.,]\d+)?\s*(?:kg|l)', valor, flags=re.IGNORECASE):
+            raise serializers.ValidationError('Debe tener formato número + unidad, por ejemplo 10 kg o 6 L.')
+        return valor
+
+    def validate(self, attrs):
+        """Valida la relación temporal entre mantenimiento y vencimientos."""
+        obligatorios = {
+            'codigo': 'Falta el código.',
+            'ubicacion': 'Falta la ubicación.',
+            'tipo': 'Falta el agente.',
+            'modalidad': 'Falta la modalidad.',
+            'capacidad': 'Falta la capacidad.',
+            'ultima_revision': 'Falta la fecha de mantenimiento.',
+            'fecha_vencimiento': 'Falta la fecha de vencimiento.',
+            'proxima_revision': 'Falta la próxima revisión.',
+        }
+        errores = {
+            campo: mensaje
+            for campo, mensaje in obligatorios.items()
+            if attrs.get(campo) in (None, '')
+        }
+        mantenimiento = attrs.get('ultima_revision')
+        vencimiento = attrs.get('fecha_vencimiento')
+        proxima = attrs.get('proxima_revision')
+        fabricacion = attrs.get('fecha_fabricacion')
+
+        if vencimiento and mantenimiento and vencimiento <= mantenimiento:
+            raise serializers.ValidationError({
+                'fecha_vencimiento': 'Debe ser posterior a la fecha de mantenimiento.'
+            })
+        if proxima and mantenimiento and proxima < mantenimiento:
+            raise serializers.ValidationError({
+                'proxima_revision': 'No puede ser anterior a la fecha de mantenimiento.'
+            })
+        if fabricacion:
+            from django.utils import timezone
+            if fabricacion > timezone.now().date():
+                raise serializers.ValidationError({
+                    'fecha_fabricacion': 'No puede ser una fecha futura.'
+                })
+        if errores:
+            raise serializers.ValidationError(errores)
+        return attrs
 
 
 class CodigoUnicoPorEmpresaMixin:
