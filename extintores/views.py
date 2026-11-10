@@ -11,8 +11,10 @@ from rest_framework import viewsets, filters, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.exceptions import PermissionDenied
 from django.conf import settings
 from django.http import Http404, HttpResponse
+from django.db import IntegrityError
 from django.db.models import Q
 from io import BytesIO
 from pathlib import Path
@@ -28,6 +30,12 @@ from .serializers import (
     ExtintorPublicSerializer,
     ExtintorCreateSerializer,
     RevisionExtintorSerializer,
+)
+from .services.carga_masiva import (
+    MAX_FILAS,
+    guardar_filas,
+    leer_y_validar_excel,
+    validar_filas,
 )
 
 
@@ -127,6 +135,123 @@ class ExtintorViewSet(viewsets.ModelViewSet):
         else:
             permission_classes = [IsAuthenticated]
         return [permission() for permission in permission_classes]
+
+    def _empresa_carga_masiva(self, request):
+        """Resuelve la empresa y valida el alcance del usuario para la carga."""
+        empresa_id = request.data.get('empresa_id')
+        if empresa_id in (None, ''):
+            raise serializers.ValidationError({'detail': 'Debes enviar empresa_id.'})
+
+        try:
+            empresa = Empresa.objects.filter(pk=empresa_id).first()
+        except (TypeError, ValueError):
+            empresa = None
+        if not empresa:
+            raise serializers.ValidationError({'detail': 'La empresa indicada no existe.'})
+
+        perfil = getattr(request.user, 'perfil', None)
+        if request.user.is_superuser or (perfil and perfil.rol == Perfil.ROLE_SUPERADMIN):
+            return empresa
+
+        if perfil and perfil.rol == Perfil.ROLE_ADMIN_EMPRESA:
+            if perfil.empresa_id != empresa.id:
+                raise PermissionDenied('No tienes permiso para cargar extintores en esta empresa.')
+            return empresa
+
+        raise PermissionDenied('Solo SUPERADMIN o ADMIN_EMPRESA pueden realizar cargas masivas.')
+
+    @action(detail=False, methods=['post'], url_path='carga-masiva/validar')
+    def carga_masiva_validar(self, request):
+        """Valida un archivo XLSX sin crear registros."""
+        try:
+            empresa = self._empresa_carga_masiva(request)
+        except serializers.ValidationError as exc:
+            detalle = exc.detail.get('detail', 'Solicitud inválida.')
+            if isinstance(detalle, (list, tuple)):
+                detalle = detalle[0]
+            return Response({'detail': str(detalle)}, status=status.HTTP_400_BAD_REQUEST)
+
+        archivo = request.FILES.get('archivo')
+        if not archivo:
+            return Response(
+                {'detail': 'Debes enviar el archivo .xlsx en el campo archivo.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validas, con_error = leer_y_validar_excel(archivo, empresa)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('Error leyendo la carga masiva de extintores')
+            return Response(
+                {'detail': f'No se pudo leer el archivo Excel: {exc}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({
+            'empresa': {'id': empresa.id, 'nombre': empresa.nombre},
+            'total': len(validas) + len(con_error),
+            'validas': validas,
+            'con_error': con_error,
+        })
+
+    @action(detail=False, methods=['post'], url_path='carga-masiva/confirmar')
+    def carga_masiva_confirmar(self, request):
+        """Revalida y guarda filas corregidas dentro de una transacción."""
+        try:
+            empresa = self._empresa_carga_masiva(request)
+        except serializers.ValidationError as exc:
+            detalle = exc.detail.get('detail', 'Solicitud inválida.')
+            if isinstance(detalle, (list, tuple)):
+                detalle = detalle[0]
+            return Response({'detail': str(detalle)}, status=status.HTTP_400_BAD_REQUEST)
+
+        filas = request.data.get('filas')
+        if not isinstance(filas, list):
+            return Response(
+                {'detail': 'Debes enviar filas como una lista JSON.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not filas:
+            return Response(
+                {'detail': 'Debes enviar al menos una fila.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(filas) > MAX_FILAS:
+            return Response(
+                {'detail': f'No se pueden confirmar más de {MAX_FILAS} filas.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        validas, con_error = validar_filas(filas, empresa)
+        if con_error:
+            return Response({
+                'detail': 'Hay filas inválidas. No se creó ningún extintor.',
+                'total': len(filas),
+                'validas': validas,
+                'con_error': con_error,
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            creados = guardar_filas(validas, empresa, request.user)
+        except IntegrityError:
+            return Response({
+                'detail': 'La carga fue cancelada: uno de los códigos ya existe en la empresa. Vuelve a validar e inténtalo de nuevo.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as exc:
+            logger.exception('Error guardando carga masiva de extintores')
+            return Response({
+                'detail': f'La carga completa fue cancelada por un error al generar o guardar los QR: {exc}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'creados': len(creados),
+            'extintores': [
+                {'id': str(extintor.id), 'codigo': extintor.codigo}
+                for extintor in creados
+            ],
+        }, status=status.HTTP_201_CREATED)
 
     def _describe_png_buffer(self, buffer):
         buffer.seek(0)
