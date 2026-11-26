@@ -2,7 +2,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_nested import routers
-from .views import ContactoViewSet, EmpresaViewSet
+from .views import ContactoViewSet, EmpresaViewSet, AsignarPropietarioView
 
 # Router principal para empresas (sin el prefijo 'empresas/' porque ya viene de core.urls)
 router = DefaultRouter()
@@ -17,6 +17,7 @@ empresa_router = routers.NestedDefaultRouter(
 empresa_router.register(r'contactos', ContactoViewSet, basename='empresa-contactos')
 
 urlpatterns = [
+    path('asignar-propietario/', AsignarPropietarioView.as_view(), name='asignar-propietario'),
     path('', include(router.urls)),
     path('', include(empresa_router.urls)),
 ]

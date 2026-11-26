@@ -1101,3 +1101,52 @@ Esta documentación refleja el estado ACTUAL de la API implementada.
 
 **¿Preguntas o problemas?** Consulta [`BACKEND_HANDOFF.md`](BACKEND_HANDOFF.md) para guía completa de setup.
 
+## Carga masiva de extintores desde Excel
+
+Estos endpoints requieren autenticación y solo están disponibles para `SUPERADMIN` (cualquier empresa) y `ADMIN_EMPRESA` (únicamente su empresa). La carga está limitada a 200 filas y archivos `.xlsx` de hasta 5 MB.
+
+### Validar archivo
+
+`POST /extintores/carga-masiva/validar/`
+
+Recibe `multipart/form-data` con `empresa_id` y `archivo`. El archivo debe contener `Código`, `Ubicación`, `Agente`, `Modalidad`, `Capacidad`, `Fecha de fabricación` (opcional), `Fecha de mantenimiento`, `Fecha de vencimiento` y `Próxima revisión`.
+
+No crea registros. Devuelve la empresa, el total, las filas válidas y las filas con errores:
+
+```json
+{
+  "empresa": {"id": 1, "nombre": "Empresa"},
+  "total": 2,
+  "validas": [{"fila": 2, "datos": {"codigo": "EXT-001"}}],
+  "con_error": [{"fila": 3, "datos": {"codigo": "EXT-002"}, "errores": [{"campo": "capacidad", "mensaje": "..."}]}]
+}
+```
+
+### Confirmar carga
+
+`POST /extintores/carga-masiva/confirmar/`
+
+Recibe JSON con `empresa_id` y las filas corregidas. El servidor revalida todo, incluyendo duplicados dentro de la solicitud y contra la empresa seleccionada. Si alguna fila es inválida, no se crea ninguna. Si todas son válidas, cada extintor se guarda individualmente dentro de una transacción para generar su QR.
+
+```json
+{
+  "empresa_id": 1,
+  "filas": [{
+    "codigo": "EXT-001",
+    "ubicacion": "Pasillo principal",
+    "tipo": "PQS_ABC",
+    "modalidad": "portatil",
+    "capacidad": "10 kg",
+    "fecha_fabricacion": "2024-01-15",
+    "ultima_revision": "2026-01-10",
+    "fecha_vencimiento": "2028-01-10",
+    "proxima_revision": "2026-07-10"
+  }]
+}
+```
+
+Respuesta exitosa:
+
+```json
+{"creados": 1, "extintores": [{"id": "uuid", "codigo": "EXT-001"}]}
+```

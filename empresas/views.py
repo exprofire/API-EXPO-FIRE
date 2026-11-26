@@ -3,19 +3,25 @@ from rest_framework import viewsets, status
 from rest_framework.parsers import FormParser, MultiPartParser, JSONParser
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import IsAuthenticated, BasePermission
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.views import APIView
+from django.db import transaction
 from django.db.models import Count, Q
 from django.contrib.auth import get_user_model
 
-from .models import Empresa, Contacto
+from .models import Empresa, Contacto, GrupoEmpresas
 from .serializers import (
     EmpresaSerializer, 
     EmpresaCreacionSerializer, 
     EmpresaResumenSerializer,
-    ContactoSerializer
+    ContactoSerializer,
+    GrupoEmpresasSerializer,
+    AsignacionPropietarioSerializer,
 )
 from usuarios.models import Perfil
+from .services.asignacion import asignar_empresas
+from usuarios.visibilidad import empresas_visibles, puede_ver_empresa
 
 User = get_user_model()
 
@@ -36,26 +42,22 @@ class EmpresaViewSet(viewsets.ModelViewSet):
     - POST /empresas/{id}/borrar/ - Marcar una empresa como borrada sin eliminarla
     """
     
-    queryset = Empresa.objects.all()
+    queryset = Empresa.objects.select_related('grupo', 'propietario').all()
     serializer_class = EmpresaSerializer
     parser_classes = [JSONParser, FormParser, MultiPartParser]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        user = self.request.user
+        return empresas_visibles(self.request.user).select_related(
+            'grupo', 'propietario'
+        )
 
-        if not user.is_authenticated:
-            return queryset.none()
-
-        perfil = getattr(user, 'perfil', None)
-        if user.is_superuser or (perfil and perfil.rol == Perfil.ROLE_SUPERADMIN):
-            return queryset
-
-        empresa_id = getattr(perfil, 'empresa_id', None)
-        if empresa_id:
-            return queryset.filter(id=empresa_id)
-
-        return queryset.none()
+    def filter_queryset(self, queryset):
+        """Aplica grupo después del alcance ya calculado para el usuario."""
+        queryset = super().filter_queryset(queryset)
+        grupo_id = self.request.query_params.get('grupo')
+        if grupo_id:
+            queryset = queryset.filter(grupo_id=grupo_id)
+        return queryset
     @action(detail=False, methods=['get'], url_path='resumen')
     def resumen(self, request):
         """
@@ -130,7 +132,9 @@ class EmpresaViewSet(viewsets.ModelViewSet):
         """
         Fija el técnico autenticado como creador de la empresa.
         """
-        serializer.save(creado_por=self.request.user)
+        perfil = getattr(self.request.user, 'perfil', None)
+        propietario = self.request.user if perfil and perfil.rol == Perfil.ROLE_ADMIN_EXPROFIRE else None
+        serializer.save(creado_por=self.request.user, propietario=propietario)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -198,7 +202,15 @@ class EmpresaViewSet(viewsets.ModelViewSet):
         if not (
             request.user.is_superuser
             or (perfil and perfil.rol == Perfil.ROLE_SUPERADMIN)
-            or (perfil and perfil.empresa_id == empresa.id and perfil.rol == Perfil.ROLE_ADMIN_EMPRESA)
+            or (
+                perfil
+                and perfil.rol in [
+                    Perfil.ROLE_ADMIN_EMPRESA,
+                    Perfil.ROLE_ADMIN_EXPROFIRE,
+                    Perfil.ROLE_ADMIN_GRUPO,
+                ]
+                and puede_ver_empresa(request.user, empresa.id)
+            )
         ):
             raise PermissionDenied('No tienes permiso para borrar esta empresa.')
 
@@ -249,13 +261,14 @@ class ContactoViewSet(viewsets.ModelViewSet):
             return
 
         empresa_permitida_id = getattr(perfil, 'empresa_id', None)
-        if not empresa_permitida_id:
+        if not empresa_permitida_id and not empresas_visibles(user).exists():
             raise PermissionDenied('Tu usuario no tiene una empresa asociada.')
 
-        if empresa_id and str(empresa_id) != str(empresa_permitida_id):
+        empresa_id_resuelto = empresa_id or empresa_permitida_id
+        if not puede_ver_empresa(user, empresa_id_resuelto):
             raise PermissionDenied('No puedes crear contactos para otra empresa.')
 
-        empresa = Empresa.objects.get(id=empresa_permitida_id)
+        empresa = Empresa.objects.get(id=empresa_id_resuelto)
         serializer.save(empresa=empresa)
     
     def get_permissions(self):
@@ -269,13 +282,8 @@ class ContactoViewSet(viewsets.ModelViewSet):
         if not user.is_authenticated:
             return queryset.none()
 
-        perfil = getattr(user, 'perfil', None)
-        if not (user.is_superuser or (perfil and perfil.rol == Perfil.ROLE_SUPERADMIN)):
-            empresa_id_permitida = getattr(perfil, 'empresa_id', None)
-            if empresa_id_permitida:
-                queryset = queryset.filter(empresa_id=empresa_id_permitida)
-            else:
-                return queryset.none()
+        if not (user.is_superuser or (getattr(getattr(user, 'perfil', None), 'rol', None) == Perfil.ROLE_SUPERADMIN)):
+            queryset = queryset.filter(empresa_id__in=empresas_visibles(user).values('id'))
 
         empresa_id = (
             self.kwargs.get('empresa_pk')
@@ -286,3 +294,90 @@ class ContactoViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(empresa_id=empresa_id)
         
         return queryset
+
+
+class SoloSuperadminPermission(BasePermission):
+    """Permiso exclusivo para SUPERADMIN o superusuario Django."""
+
+    message = 'Solo SUPERADMIN o superusuario pueden gestionar grupos y propietarios.'
+
+    def has_permission(self, request, view):
+        perfil = getattr(request.user, 'perfil', None)
+        return bool(
+            request.user.is_authenticated
+            and (
+                request.user.is_superuser
+                or (perfil and perfil.rol == Perfil.ROLE_SUPERADMIN)
+            )
+        )
+
+
+class GrupoEmpresasViewSet(viewsets.ModelViewSet):
+    """CRUD y asociación de empresas para grupos."""
+
+    queryset = GrupoEmpresas.objects.select_related('propietario', 'creado_por').all()
+    serializer_class = GrupoEmpresasSerializer
+    permission_classes = [IsAuthenticated, SoloSuperadminPermission]
+
+    def perform_create(self, serializer):
+        serializer.save(creado_por=self.request.user, propietario=None)
+
+    def destroy(self, request, *args, **kwargs):
+        grupo = self.get_object()
+        if grupo.empresas.exists():
+            return Response(
+                {'detail': 'No puedes borrar un grupo que tiene empresas asignadas.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        return super().destroy(request, *args, **kwargs)
+
+    def _ids(self, request):
+        ids = request.data.get('empresa_ids')
+        if not isinstance(ids, list) or any(not isinstance(item, int) for item in ids):
+            return None
+        return ids
+
+    @action(detail=True, methods=['post'], url_path='agregar-empresas')
+    def agregar_empresas(self, request, pk=None):
+        grupo = self.get_object()
+        ids = self._ids(request)
+        if ids is None:
+            return Response({'detail': 'empresa_ids debe ser una lista.'}, status=400)
+        empresas = Empresa.objects.filter(id__in=ids)
+        existentes = set(empresas.values_list('id', flat=True))
+        with transaction.atomic():
+            empresas.update(grupo=grupo)
+        return Response({
+            'asignadas': sorted(existentes),
+            'no_existen': sorted(set(ids) - existentes),
+        })
+
+    @action(detail=True, methods=['post'], url_path='quitar-empresas')
+    def quitar_empresas(self, request, pk=None):
+        grupo = self.get_object()
+        ids = self._ids(request)
+        if ids is None:
+            return Response({'detail': 'empresa_ids debe ser una lista.'}, status=400)
+        empresas = Empresa.objects.filter(id__in=ids, grupo=grupo)
+        quitadas = list(empresas.values_list('id', flat=True))
+        with transaction.atomic():
+            empresas.update(grupo=None)
+        return Response({'quitadas': sorted(quitadas)})
+
+
+class AsignarPropietarioView(APIView):
+    """Simula o aplica asignaciones de propietario."""
+
+    permission_classes = [IsAuthenticated, SoloSuperadminPermission]
+
+    def post(self, request):
+        serializer = AsignacionPropietarioSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            resultado = asignar_empresas(
+                usuario=request.user,
+                **serializer.validated_data,
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(resultado)

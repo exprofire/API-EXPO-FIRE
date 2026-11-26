@@ -11,6 +11,7 @@ from django.contrib.auth.tokens import default_token_generator
 from django.utils import timezone
 from django.utils.encoding import force_bytes, force_str
 from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -19,6 +20,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
+from empresas.services.asignacion import transferir_cartera
+from usuarios.visibilidad import empresas_visibles, puede_ver_empresa
 
 from .models import Perfil
 from .serializers import (
@@ -28,8 +31,10 @@ from .serializers import (
     PerfilCreateSerializer,
     SolicitarOlvidePasswordSerializer,
     SolicitarResetPasswordSerializer,
+    CambiarRolSerializer,
 )
-from empresas.serializers import EmpresaSerializer
+from empresas.models import Empresa, GrupoEmpresas
+from empresas.serializers import EmpresaSerializer, TransferenciaCarteraSerializer
 from core.brevo import send_brevo_transactional_email
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -112,6 +117,9 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             'rol': perfil.rol if perfil else None,
             'empresa_id': perfil.empresa_id if perfil else None,
             'empresa': empresa_data,
+            'grupo_id': perfil.grupo_id if perfil else None,
+            'puede_reportes': bool(perfil and perfil.puede_reportes),
+            'puede_documentar': bool(perfil and perfil.puede_documentar),
             'logo_empresa_url': empresa_data['logo_url'] if empresa_data else None,
         }
         return data
@@ -263,9 +271,44 @@ class EquipoEmpresaView(APIView):
             return False
         if perfil.rol == Perfil.ROLE_SUPERADMIN:
             return True
+        if perfil.rol in [Perfil.ROLE_ADMIN_EXPROFIRE, Perfil.ROLE_ADMIN_GRUPO]:
+            return puede_ver_empresa(user, empresa_id)
         if perfil.rol in [Perfil.ROLE_ADMIN_EMPRESA, Perfil.ROLE_SUPERVISOR]:
             return str(perfil.empresa_id) == str(empresa_id)
         return False
+
+
+class MisEmpresasView(APIView):
+    """Lista las empresas visibles para el usuario autenticado."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        empresas = empresas_visibles(request.user).select_related(
+            'grupo', 'propietario'
+        ).only(
+            'id', 'nombre', 'logo', 'grupo_id', 'grupo__nombre',
+            'propietario_id', 'propietario__username',
+            'propietario__first_name', 'propietario__last_name',
+        )
+        return Response({
+            'resultados': [
+                {
+                    'id': empresa.id,
+                    'nombre': empresa.nombre,
+                    'logo': empresa.logo.url if empresa.logo else None,
+                    'grupo_id': empresa.grupo_id,
+                    'grupo_nombre': empresa.grupo.nombre if empresa.grupo else None,
+                    'propietario_id': empresa.propietario_id,
+                    'propietario_nombre': (
+                        empresa.propietario.get_full_name()
+                        or empresa.propietario.username
+                        if empresa.propietario else None
+                    ),
+                }
+                for empresa in empresas
+            ]
+        })
 
 
 class PerfilViewSet(viewsets.ModelViewSet):
@@ -318,6 +361,8 @@ class PerfilViewSet(viewsets.ModelViewSet):
                 and perfil_solicitante.rol in [
                     Perfil.ROLE_SUPERADMIN,
                     Perfil.ROLE_ADMIN_EMPRESA,
+                    Perfil.ROLE_ADMIN_EXPROFIRE,
+                    Perfil.ROLE_ADMIN_GRUPO,
                 ]
             )
         )
@@ -377,6 +422,138 @@ class PerfilViewSet(viewsets.ModelViewSet):
         response_data['correo_bienvenida'] = correo_bienvenida
         headers = self.get_success_headers(read_serializer.data)
         return Response(response_data, status=status.HTTP_201_CREATED, headers=headers)
+
+    @action(detail=True, methods=['post'], url_path='transferir-cartera')
+    def transferir_cartera(self, request, pk=None):
+        """Transfiere la cartera de un ADMIN_EXPROFIRE a otro."""
+        perfil_objetivo = self.get_object()
+        solicitante = getattr(request.user, 'perfil', None)
+        if not (
+            request.user.is_superuser
+            or (solicitante and solicitante.rol == Perfil.ROLE_SUPERADMIN)
+        ):
+            return Response(
+                {'detail': 'Solo SUPERADMIN o superusuario pueden transferir carteras.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        serializer = TransferenciaCarteraSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            resultado = transferir_cartera(
+                propietario_actual_id=perfil_objetivo.user_id,
+                usuario=request.user,
+                **serializer.validated_data,
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(resultado)
+
+    @action(detail=True, methods=['post'], url_path='cambiar-rol')
+    def cambiar_rol(self, request, pk=None):
+        """Cambia rol y asignación empresarial bajo control de SUPERADMIN."""
+        perfil_objetivo = self.get_object()
+        solicitante = getattr(request.user, 'perfil', None)
+        if not (
+            request.user.is_superuser
+            or (solicitante and solicitante.rol == Perfil.ROLE_SUPERADMIN)
+        ):
+            return Response(
+                {'detail': 'Solo SUPERADMIN o superusuario pueden cambiar roles.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if perfil_objetivo.user_id == request.user.id:
+            return Response(
+                {'detail': 'No puedes cambiar tu propio rol.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = CambiarRolSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        datos = serializer.validated_data
+        nuevo_rol = datos['rol']
+        empresa_id = datos.get('empresa_id')
+        grupo_id = datos.get('grupo_id')
+
+        if nuevo_rol in [Perfil.ROLE_ADMIN_EMPRESA, Perfil.ROLE_SUPERVISOR, Perfil.ROLE_ANALISTA] and not empresa_id:
+            return Response({'detail': 'Este rol requiere empresa_id.'}, status=400)
+        if nuevo_rol == Perfil.ROLE_ADMIN_GRUPO and not grupo_id:
+            return Response({'detail': 'ADMIN_GRUPO requiere grupo_id.'}, status=400)
+        if empresa_id and not Empresa.objects.filter(id=empresa_id).exists():
+            return Response({'detail': 'Empresa no encontrada.'}, status=400)
+        if grupo_id and not GrupoEmpresas.objects.filter(id=grupo_id).exists():
+            return Response({'detail': 'Grupo no encontrado.'}, status=400)
+        if perfil_objetivo.rol == Perfil.ROLE_SUPERADMIN and nuevo_rol != Perfil.ROLE_SUPERADMIN:
+            queda_otro = Perfil.objects.filter(
+                rol=Perfil.ROLE_SUPERADMIN,
+                user__is_active=True,
+            ).exclude(pk=perfil_objetivo.pk).exists()
+            if not queda_otro:
+                return Response({'detail': 'Debe permanecer al menos un SUPERADMIN activo.'}, status=400)
+
+        antes = {
+            'rol': perfil_objetivo.rol,
+            'empresa_id': perfil_objetivo.empresa_id,
+            'grupo_id': perfil_objetivo.grupo_id,
+            'is_superuser': perfil_objetivo.user.is_superuser,
+            'is_staff': perfil_objetivo.user.is_staff,
+        }
+        with transaction.atomic():
+            perfil_objetivo.rol = nuevo_rol
+            perfil_objetivo.empresa_id = (
+                empresa_id
+                if nuevo_rol in [Perfil.ROLE_ADMIN_EMPRESA, Perfil.ROLE_SUPERVISOR, Perfil.ROLE_ANALISTA]
+                else None
+            )
+            perfil_objetivo.grupo_id = grupo_id if nuevo_rol == Perfil.ROLE_ADMIN_GRUPO else None
+            perfil_objetivo.save(update_fields=['rol', 'empresa', 'grupo', 'updated_at'])
+            if nuevo_rol != Perfil.ROLE_SUPERADMIN:
+                perfil_objetivo.user.is_superuser = False
+                perfil_objetivo.user.is_staff = False
+                perfil_objetivo.user.save(update_fields=['is_superuser', 'is_staff'])
+        return Response({
+            'antes': antes,
+            'despues': {
+                'rol': perfil_objetivo.rol,
+                'empresa_id': perfil_objetivo.empresa_id,
+                'grupo_id': perfil_objetivo.grupo_id,
+                'is_superuser': perfil_objetivo.user.is_superuser,
+                'is_staff': perfil_objetivo.user.is_staff,
+            },
+        })
+
+    def update(self, request, *args, **kwargs):
+        """Aplica alcance por rol antes de permitir editar un perfil."""
+        perfil_objetivo = self.get_object()
+        perfil_solicitante = getattr(request.user, 'perfil', None)
+        es_privilegiado = (
+            request.user.is_superuser
+            or (perfil_solicitante and perfil_solicitante.rol == Perfil.ROLE_SUPERADMIN)
+        )
+        campos_sensibles = {
+            'rol', 'empresa_id', 'empresa', 'grupo_id', 'grupo',
+            'is_superuser', 'is_staff', 'puede_reportes', 'puede_documentar',
+        }
+        puede_gestionar = self._puede_gestionar_usuario(request.user, perfil_objetivo)
+        es_propio = perfil_objetivo.user_id == request.user.id
+
+        if es_propio and campos_sensibles.intersection(request.data.keys()):
+            return Response(
+                {'detail': 'No puedes modificar esos campos sobre tu propio usuario.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if not es_privilegiado and not puede_gestionar:
+            if not self._puede_editar_perfil_basico(request.user, perfil_objetivo):
+                return Response(
+                    {'detail': 'No tienes permiso para editar este usuario.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if campos_sensibles.intersection(request.data.keys()):
+                return Response(
+                    {'detail': 'No tienes permiso para modificar rol, empresa o privilegios.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        return super().update(request, *args, **kwargs)
 
     @action(detail=True, methods=['post'], url_path='reenviar-bienvenida')
     def reenviar_bienvenida(self, request, pk=None):
@@ -516,10 +693,25 @@ class PerfilViewSet(viewsets.ModelViewSet):
             return False
         if perfil_solicitante.rol == Perfil.ROLE_SUPERADMIN:
             return True
-        if perfil_solicitante.rol == Perfil.ROLE_ADMIN_EMPRESA:
-            return (
-                perfil_solicitante.empresa_id
-                and perfil_solicitante.empresa_id == perfil_objetivo.empresa_id
+        if perfil_solicitante.rol in [
+            Perfil.ROLE_ADMIN_EMPRESA,
+            Perfil.ROLE_ADMIN_EXPROFIRE,
+            Perfil.ROLE_ADMIN_GRUPO,
+        ]:
+            return bool(
+                perfil_objetivo.empresa_id
+                and puede_ver_empresa(user, perfil_objetivo.empresa_id)
             )
+        return False
+
+    def _puede_editar_perfil_basico(self, user, perfil_objetivo):
+        """Admin gestiona su empresa; supervisor/analista solo a sí mismos."""
+        perfil_solicitante = getattr(user, 'perfil', None)
+        if not perfil_solicitante:
+            return False
+        if perfil_solicitante.rol == Perfil.ROLE_ADMIN_EMPRESA:
+            return self._puede_gestionar_usuario(user, perfil_objetivo)
+        if perfil_solicitante.rol in [Perfil.ROLE_SUPERVISOR, Perfil.ROLE_ANALISTA]:
+            return perfil_objetivo.user_id == user.id
         return False
 

@@ -17,6 +17,7 @@ from usuarios.views import (
     ConfirmarOlvidePasswordView,
     CustomTokenObtainPairView,
     PerfilDetailView,
+    MisEmpresasView,
     SolicitarOlvidePasswordView,
 )
 
@@ -28,6 +29,7 @@ urlpatterns = [
     path('reestablecer-password/', ConfirmarOlvidePasswordView.as_view(), name='reestablecer-password'),
     # Perfil del usuario autenticado
     path('api/perfil/', PerfilDetailView.as_view(), name='perfil-detail'),
+    path('mis-empresas/', MisEmpresasView.as_view(), name='mis-empresas-global'),
 
     # Usuarios (list, detail)
     path('usuarios/', include('usuarios.urls')),
@@ -40,6 +42,7 @@ urlpatterns = [
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('api/', include('leads.urls')),
     path('empresas/', include('empresas.urls')),
+    path('grupos/', include('empresas.grupos_urls')),
     path('forms/', include('forms.urls')),
     path('dashboard/', include('dashboard.urls')),
     path('reportes/', include('reportes.urls')),

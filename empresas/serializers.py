@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Empresa, Contacto
+from .models import Empresa, Contacto, GrupoEmpresas
 from usuarios.models import Perfil
 
 
@@ -46,6 +46,10 @@ class EmpresaSerializer(serializers.ModelSerializer):
     creado_por_nombre = serializers.SerializerMethodField()
     creado_por_email = serializers.EmailField(source='creado_por.email', read_only=True)
     creado_por_rol = serializers.SerializerMethodField()
+    grupo_id = serializers.IntegerField(read_only=True)
+    grupo_nombre = serializers.SerializerMethodField()
+    propietario_id = serializers.IntegerField(read_only=True)
+    propietario_nombre = serializers.SerializerMethodField()
     contactos = ContactoSerializer(many=True, read_only=True)
     logo_url = serializers.SerializerMethodField()
 
@@ -65,6 +69,10 @@ class EmpresaSerializer(serializers.ModelSerializer):
             'creado_por_nombre',
             'creado_por_email',
             'creado_por_rol',
+            'grupo_id',
+            'grupo_nombre',
+            'propietario_id',
+            'propietario_nombre',
             'metros_cuadrados_totales',
             'perimetro',
             'metros_cuadrados_estacionamiento',
@@ -94,6 +102,16 @@ class EmpresaSerializer(serializers.ModelSerializer):
                     'nombre': perfil.get_rol_display(),
                 }
         return None
+
+    def get_grupo_nombre(self, obj):
+        """Devuelve el nombre del grupo, o ``None`` si no está agrupada."""
+        return obj.grupo.nombre if obj.grupo else None
+
+    def get_propietario_nombre(self, obj):
+        """Devuelve el nombre completo o username del propietario."""
+        if not obj.propietario:
+            return None
+        return obj.propietario.get_full_name() or obj.propietario.username
 
     def get_logo_url(self, obj):
         if not obj.logo:
@@ -176,3 +194,38 @@ class EmpresaResumenSerializer(serializers.Serializer):
         child=serializers.DictField(),
         required=False,
     )
+
+
+class GrupoEmpresasSerializer(serializers.ModelSerializer):
+    """Serializer de lectura y escritura para grupos de empresas."""
+
+    class Meta:
+        model = GrupoEmpresas
+        fields = [
+            'id',
+            'nombre',
+            'descripcion',
+            'activo',
+            'propietario',
+            'creado_por',
+            'created_at',
+        ]
+        read_only_fields = ['id', 'propietario', 'creado_por', 'created_at']
+
+
+class AsignacionPropietarioSerializer(serializers.Serializer):
+    """Valida las solicitudes nuevas de asignación de propietarios."""
+
+    propietario_id = serializers.IntegerField()
+    criterios = serializers.DictField()
+    modo = serializers.ChoiceField(choices=['simular', 'aplicar'], default='simular')
+    sobrescribir = serializers.BooleanField(default=False)
+
+
+class TransferenciaCarteraSerializer(serializers.Serializer):
+    """Valida la transferencia de empresas y grupos entre propietarios."""
+
+    nuevo_propietario_id = serializers.IntegerField()
+    incluir_grupos = serializers.BooleanField(default=False)
+    desactivar_usuario = serializers.BooleanField(default=False)
+    modo = serializers.ChoiceField(choices=['simular', 'aplicar'], default='simular')
