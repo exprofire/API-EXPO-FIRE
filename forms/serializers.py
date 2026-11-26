@@ -310,12 +310,12 @@ class FormRunSerializer(serializers.ModelSerializer):
             return None
 
     def _resolver_empresa_por_contexto(self, scope_type, scope_id):
+        request = self.context.get('request')
+        user = getattr(request, 'user', None) if request else None
         extintor = self._obtener_extintor(scope_type, scope_id)
         if extintor and extintor.empresa:
             return extintor.empresa
 
-        request = self.context.get('request')
-        user = getattr(request, 'user', None) if request else None
         perfil = getattr(user, 'perfil', None) if user else None
         if perfil and perfil.empresa_id:
             return perfil.empresa

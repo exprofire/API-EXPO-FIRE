@@ -21,6 +21,7 @@ from empresas.models import Contacto, Empresa
 from empresas.serializers import ContactoSerializer, EmpresaSerializer
 from extintores.models import Extintor
 from usuarios.models import Perfil
+from usuarios.visibilidad import empresas_visibles, es_superadmin, puede_ver_empresa
 
 
 ESTADO_PRIORIDAD = {
@@ -54,6 +55,11 @@ class InventarioReporteView(APIView):
             Empresa.objects.prefetch_related('contactos'),
             id=empresa_id,
         )
+        if not es_superadmin(request.user) and not puede_ver_empresa(request.user, empresa.id):
+            return Response(
+                {'detail': 'No tienes permiso para consultar esta empresa.'},
+                status=403,
+            )
         primer_contacto = self._get_primer_contacto(empresa)
         extintores = list(
             Extintor.objects.filter(empresa=empresa)
@@ -496,6 +502,8 @@ class LogUsuariosView(APIView):
 
     def get(self, request):
         queryset = Perfil.objects.select_related('user', 'empresa').all()
+        if not es_superadmin(request.user):
+            queryset = queryset.filter(empresa_id__in=empresas_visibles(request.user).values('id'))
         empresa_id = request.query_params.get('empresa_id')
         usuario_id = request.query_params.get('usuario_id')
 
@@ -581,6 +589,8 @@ class LogExtintoresView(APIView):
 
     def get(self, request):
         queryset = Extintor.objects.select_related('empresa', 'creado_por').all()
+        if not es_superadmin(request.user):
+            queryset = queryset.filter(empresa_id__in=empresas_visibles(request.user).values('id'))
         empresa_id = request.query_params.get('empresa_id')
         extintor_id = request.query_params.get('extintor_id')
         creado_por = request.query_params.get('creado_por')

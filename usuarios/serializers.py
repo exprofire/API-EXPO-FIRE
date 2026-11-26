@@ -6,8 +6,9 @@ from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
 from .models import Perfil
-from empresas.models import Empresa
+from empresas.models import Empresa, GrupoEmpresas
 from empresas.serializers import EmpresaSerializer
+from usuarios.visibilidad import puede_ver_empresa
 
 User = get_user_model()
 
@@ -27,6 +28,15 @@ class PerfilSerializer(serializers.ModelSerializer):
     )
 
     empresa = EmpresaSerializer(read_only=True)
+    grupo_id = serializers.IntegerField(required=False, allow_null=True)
+    grupo = serializers.SerializerMethodField()
+    puede_reportes = serializers.BooleanField(required=False)
+    puede_documentar = serializers.BooleanField(required=False)
+    # Estos campos solo se aceptan en escritura cuando la vista autoriza al
+    # usuario gestor; la vista impide que el propio usuario los cambie.
+    empresa_id = serializers.IntegerField(required=False, allow_null=True, write_only=True)
+    is_superuser = serializers.BooleanField(required=False, write_only=True)
+    is_staff = serializers.BooleanField(required=False, write_only=True)
 
     class UserSerializer(serializers.ModelSerializer):
         class Meta:
@@ -43,8 +53,15 @@ class PerfilSerializer(serializers.ModelSerializer):
             'email',
             'nombre_completo',
             'empresa',
+            'empresa_id',
+            'grupo_id',
+            'grupo',
             'foto_perfil',
             'rol',
+            'is_superuser',
+            'is_staff',
+            'puede_reportes',
+            'puede_documentar',
             'telefono',
             'domicilio',
             'requiere_cambio_password',
@@ -68,6 +85,11 @@ class PerfilSerializer(serializers.ModelSerializer):
         serializer = self.UserSerializer(obj.user, context=self.context)
         return serializer.data
 
+    def get_grupo(self, obj):
+        if not obj.grupo_id:
+            return None
+        return {'id': obj.grupo_id, 'nombre': obj.grupo.nombre}
+
     def to_representation(self, instance):
         data = super().to_representation(instance)
         if instance.foto_perfil:
@@ -81,6 +103,38 @@ class PerfilSerializer(serializers.ModelSerializer):
             data['foto_perfil'] = None
         return data
 
+    def validate_empresa_id(self, value):
+        if value is None:
+            return None
+        if not Empresa.objects.filter(id=value).exists():
+            raise serializers.ValidationError('Empresa no encontrada.')
+        return value
+
+    def update(self, instance, validated_data):
+        """Actualiza el perfil y, si la vista lo permite, los campos sensibles."""
+        empresa_id = validated_data.pop('empresa_id', serializers.empty)
+        grupo_id = validated_data.pop('grupo_id', serializers.empty)
+        is_superuser = validated_data.pop('is_superuser', serializers.empty)
+        is_staff = validated_data.pop('is_staff', serializers.empty)
+
+        perfil = super().update(instance, validated_data)
+        campos_usuario = []
+        if empresa_id is not serializers.empty:
+            perfil.empresa_id = empresa_id
+            perfil.save(update_fields=['empresa'])
+        if grupo_id is not serializers.empty:
+            perfil.grupo_id = grupo_id
+            perfil.save(update_fields=['grupo'])
+        if is_superuser is not serializers.empty:
+            perfil.user.is_superuser = is_superuser
+            campos_usuario.append('is_superuser')
+        if is_staff is not serializers.empty:
+            perfil.user.is_staff = is_staff
+            campos_usuario.append('is_staff')
+        if campos_usuario:
+            perfil.user.save(update_fields=campos_usuario)
+        return perfil
+
 
 class PerfilCreateSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
@@ -93,6 +147,7 @@ class PerfilCreateSerializer(serializers.Serializer):
         default=Perfil.ROLE_ANALISTA,
     )
     empresa_id = serializers.IntegerField(required=False)
+    grupo_id = serializers.IntegerField(required=False, allow_null=True)
     foto_perfil = serializers.ImageField(required=False, allow_null=True)
     telefono = serializers.CharField(required=False, allow_blank=True, max_length=30)
     domicilio = serializers.CharField(required=False, allow_blank=True, max_length=250)
@@ -101,32 +156,57 @@ class PerfilCreateSerializer(serializers.Serializer):
         request = self.context.get('request')
         perfil_solicitante = getattr(request.user, 'perfil', None) if request else None
 
-        if request and request.user.is_superuser:
-            return attrs
+        es_privilegiado = bool(
+            request and request.user.is_superuser
+        ) or bool(
+            perfil_solicitante and perfil_solicitante.rol == Perfil.ROLE_SUPERADMIN
+        )
+        roles_gestores = [
+            Perfil.ROLE_ADMIN_EMPRESA,
+            Perfil.ROLE_ADMIN_EXPROFIRE,
+            Perfil.ROLE_ADMIN_GRUPO,
+        ]
+        if not es_privilegiado and not (
+            perfil_solicitante and perfil_solicitante.rol in roles_gestores
+        ):
+            raise serializers.ValidationError('No tienes permiso para crear usuarios.')
 
-        if perfil_solicitante and perfil_solicitante.rol == Perfil.ROLE_SUPERADMIN:
-            return attrs
-
-        if perfil_solicitante and perfil_solicitante.rol == Perfil.ROLE_ADMIN_EMPRESA:
+        if not es_privilegiado and perfil_solicitante.rol in roles_gestores:
             if attrs['rol'] not in [Perfil.ROLE_SUPERVISOR, Perfil.ROLE_ANALISTA]:
                 raise serializers.ValidationError({
-                    'rol': 'ADMIN_EMPRESA solo puede crear supervisores y analistas.'
+                    'rol': 'Este administrador solo puede crear supervisores y analistas.'
                 })
+        if attrs['rol'] in [
+            Perfil.ROLE_ADMIN_EMPRESA,
+            Perfil.ROLE_SUPERVISOR,
+            Perfil.ROLE_ANALISTA,
+        ] and not attrs.get('empresa_id'):
+            raise serializers.ValidationError({
+                'empresa_id': 'Este rol requiere una empresa asignada.'
+            })
+        if attrs['rol'] == Perfil.ROLE_ADMIN_GRUPO and not attrs.get('grupo_id'):
+            raise serializers.ValidationError({
+                'grupo_id': 'ADMIN_GRUPO requiere un grupo asignado.'
+            })
+
+        if not es_privilegiado and perfil_solicitante.rol == Perfil.ROLE_ADMIN_EMPRESA:
             if not perfil_solicitante.empresa_id:
                 raise serializers.ValidationError({
                     'empresa_id': 'El administrador no tiene una empresa asignada.'
                 })
-
-            empresa_id = attrs.get('empresa_id')
-            if empresa_id and empresa_id != perfil_solicitante.empresa_id:
+            if attrs.get('empresa_id') and attrs['empresa_id'] != perfil_solicitante.empresa_id:
                 raise serializers.ValidationError({
                     'empresa_id': 'Solo puedes crear usuarios para tu propia empresa.'
                 })
-
             attrs['empresa_id'] = perfil_solicitante.empresa_id
-            return attrs
+        elif not es_privilegiado and attrs.get('empresa_id') and not puede_ver_empresa(
+            request.user, attrs['empresa_id']
+        ):
+            raise serializers.ValidationError({
+                'empresa_id': 'Solo puedes crear usuarios en empresas visibles.'
+            })
 
-        raise serializers.ValidationError('No tienes permiso para crear usuarios.')
+        return attrs
 
     def validate_username(self, value):
         if User.objects.filter(username=value).exists():
@@ -144,8 +224,16 @@ class PerfilCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Empresa no encontrada.")
         return value
 
+    def validate_grupo_id(self, value):
+        if value is None:
+            return value
+        if not GrupoEmpresas.objects.filter(id=value).exists():
+            raise serializers.ValidationError('Grupo no encontrado.')
+        return value
+
     def create(self, validated_data):
         empresa_id = validated_data.pop('empresa_id', None)
+        grupo_id = validated_data.pop('grupo_id', None)
         foto = validated_data.pop('foto_perfil', None)
         telefono = validated_data.pop('telefono', '')
         domicilio = validated_data.pop('domicilio', '')
@@ -163,6 +251,7 @@ class PerfilCreateSerializer(serializers.Serializer):
             user=user,
             rol=validated_data['rol'],
             empresa=empresa,
+            grupo_id=grupo_id,
             foto_perfil=foto,
             telefono=telefono,
             domicilio=domicilio,
@@ -207,3 +296,11 @@ class ConfirmarOlvidePasswordSerializer(serializers.Serializer):
 
         validate_password(attrs['password'])
         return attrs
+
+
+class CambiarRolSerializer(serializers.Serializer):
+    """Valida el cambio explícito de rol y su alcance empresarial."""
+
+    rol = serializers.ChoiceField(choices=Perfil.ROLE_CHOICES)
+    empresa_id = serializers.IntegerField(required=False, allow_null=True)
+    grupo_id = serializers.IntegerField(required=False, allow_null=True)

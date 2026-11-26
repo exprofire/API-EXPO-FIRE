@@ -24,6 +24,7 @@ from core.brevo import send_brevo_transactional_email
 from .models import Extintor
 from empresas.models import Empresa
 from usuarios.models import Perfil
+from usuarios.visibilidad import empresas_visibles, es_superadmin, puede_ver_empresa
 from .serializers import (
     ExtintorSerializer,
     ExtintorListSerializer,
@@ -102,24 +103,9 @@ class ExtintorViewSet(viewsets.ModelViewSet):
 
     def _filter_queryset_by_user_company(self, queryset):
         user = self.request.user
-        perfil = getattr(user, 'perfil', None)
-
-        if user.is_superuser:
+        if es_superadmin(user):
             return queryset
-
-        if perfil and perfil.rol == Perfil.ROLE_SUPERADMIN:
-            return queryset
-
-        if perfil and perfil.rol in [
-            Perfil.ROLE_ADMIN_EMPRESA,
-            Perfil.ROLE_SUPERVISOR,
-            Perfil.ROLE_ANALISTA,
-        ]:
-            if perfil.empresa_id:
-                return queryset.filter(empresa_id=perfil.empresa_id)
-            return queryset.none()
-
-        return queryset.none()
+        return queryset.filter(empresa_id__in=empresas_visibles(user).values('id'))
 
     def get_permissions(self):
         """
@@ -150,11 +136,15 @@ class ExtintorViewSet(viewsets.ModelViewSet):
             raise serializers.ValidationError({'detail': 'La empresa indicada no existe.'})
 
         perfil = getattr(request.user, 'perfil', None)
-        if request.user.is_superuser or (perfil and perfil.rol == Perfil.ROLE_SUPERADMIN):
+        if es_superadmin(request.user):
             return empresa
 
-        if perfil and perfil.rol == Perfil.ROLE_ADMIN_EMPRESA:
-            if perfil.empresa_id != empresa.id:
+        if perfil and perfil.rol in [
+            Perfil.ROLE_ADMIN_EMPRESA,
+            Perfil.ROLE_ADMIN_EXPROFIRE,
+            Perfil.ROLE_ADMIN_GRUPO,
+        ]:
+            if not puede_ver_empresa(request.user, empresa.id):
                 raise PermissionDenied('No tienes permiso para cargar extintores en esta empresa.')
             return empresa
 
@@ -281,6 +271,16 @@ class ExtintorViewSet(viewsets.ModelViewSet):
             serializer.save(creado_por=self.request.user, empresa=perfil.empresa)
             return
 
+        if perfil and perfil.rol in [Perfil.ROLE_ADMIN_EXPROFIRE, Perfil.ROLE_ADMIN_GRUPO]:
+            empresa_id = self.request.data.get('empresa_id')
+            if not empresa_id or not puede_ver_empresa(self.request.user, empresa_id):
+                raise PermissionDenied('Debes indicar una empresa visible para tu usuario.')
+            empresa = Empresa.objects.filter(id=empresa_id).first()
+            if not empresa:
+                raise serializers.ValidationError({'empresa_id': 'Empresa no encontrada.'})
+            serializer.save(creado_por=self.request.user, empresa=empresa)
+            return
+
         empresa = None
         empresa_id = self.request.data.get('empresa_id')
         if empresa_id not in (None, ''):
@@ -362,7 +362,12 @@ class ExtintorViewSet(viewsets.ModelViewSet):
         GET /extintores/{id}/revisiones/ -> lista el historial de revisiones.
         POST /extintores/{id}/revisiones/ -> crea una nueva revisión.
         """
-        extintor = Extintor.objects.filter(pk=pk).select_related('empresa', 'creado_por').first()
+        if request.method == 'GET':
+            # GET debe respetar el mismo alcance empresarial que el resto del viewset.
+            extintor = self.get_queryset().filter(pk=pk).select_related('empresa', 'creado_por').first()
+        else:
+            # El POST permanece público deliberadamente y conserva su resolución actual.
+            extintor = Extintor.objects.filter(pk=pk).select_related('empresa', 'creado_por').first()
         if not extintor:
             raise Http404
 
@@ -483,7 +488,14 @@ class ExtintorViewSet(viewsets.ModelViewSet):
         
         data = {
             'total': extintores.count(),
-            'empresas_activas': Empresa.objects.filter(activa=True).count(),
+            'empresas_activas': (
+                empresas_visibles(request.user).filter(activa=True).count()
+                if getattr(getattr(request.user, 'perfil', None), 'rol', None) in [
+                    Perfil.ROLE_ADMIN_EXPROFIRE,
+                    Perfil.ROLE_ADMIN_GRUPO,
+                ]
+                else Empresa.objects.filter(activa=True).count()
+            ),
             'por_estado': estados,
             'por_tipo': tipos,
         }

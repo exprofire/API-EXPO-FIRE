@@ -9,6 +9,39 @@ from django.conf import settings
 
 
 
+class GrupoEmpresas(models.Model):
+    """Agrupa empresas relacionadas sin alterar su operación actual."""
+
+    nombre = models.CharField(max_length=150, unique=True, verbose_name='Nombre')
+    descripcion = models.TextField(blank=True, default='', verbose_name='Descripción')
+    activo = models.BooleanField(default=True, verbose_name='Activo')
+    propietario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='grupos_propios',
+        verbose_name='Propietario',
+    )
+    creado_por = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='grupos_creados',
+        verbose_name='Creado por',
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='Fecha de creación')
+
+    class Meta:
+        verbose_name = 'Grupo de empresas'
+        verbose_name_plural = 'Grupos de empresas'
+        ordering = ['nombre']
+
+    def __str__(self):
+        return self.nombre
+
+
 class Empresa(models.Model):
     # --- Campos existentes ---
     id = models.AutoField(primary_key=True, verbose_name='ID')
@@ -27,6 +60,24 @@ class Empresa(models.Model):
         help_text='Control visual para ocultar la empresa en el frontend sin eliminarla.',
     )
     activa = models.BooleanField(default=True, verbose_name='Activa')
+
+    grupo = models.ForeignKey(
+        'GrupoEmpresas',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='empresas',
+        verbose_name='Grupo de empresas',
+    )
+
+    propietario = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='empresas_propias',
+        verbose_name='Propietario',
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Fecha de creación')
 
     # --- Relación con el usuario que registra (técnico) ---

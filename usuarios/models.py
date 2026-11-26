@@ -16,13 +16,13 @@ class Perfil(models.Model):
     """
 
     ROLE_SUPERADMIN = 'SUPERADMIN'
-    ROLE_ADMIN_EMPRESA = 'ADMIN_EMPRESA'
+    ROLE_ADMIN_EXPROFIRE = 'ADMIN_EXPROFIRE'    ROLE_ADMIN_GRUPO = 'ADMIN_GRUPO'    ROLE_ADMIN_EMPRESA = 'ADMIN_EMPRESA'
     ROLE_SUPERVISOR = 'SUPERVISOR'
     ROLE_ANALISTA = 'ANALISTA'
 
     ROLE_CHOICES = [
         (ROLE_SUPERADMIN, 'Expro Fire'),
-        (ROLE_ADMIN_EMPRESA, 'Admin. Empresa'),
+        (ROLE_ADMIN_EXPROFIRE, 'Admin. Expro Fire'),        (ROLE_ADMIN_GRUPO, 'Admin. Grupo'),        (ROLE_ADMIN_EMPRESA, 'Admin. Empresa'),
         (ROLE_SUPERVISOR, 'Supervisor General'),
         (ROLE_ANALISTA, 'Analista'),
     ]
@@ -40,7 +40,7 @@ class Perfil(models.Model):
         blank=True,
         related_name='perfiles',
         verbose_name='Empresa'
-    )
+    )    grupo = models.ForeignKey(        'empresas.GrupoEmpresas',        on_delete=models.SET_NULL,        null=True,        blank=True,        related_name='perfiles',        verbose_name='Grupo de empresas',    )
     foto_perfil = models.ImageField(
         upload_to='perfiles/',
         blank=True,
@@ -63,7 +63,7 @@ class Perfil(models.Model):
         default=ROLE_ANALISTA,
         verbose_name='Rol'
     )
-
+    puede_reportes = models.BooleanField(        default=False,        verbose_name='Puede consultar reportes'    )    puede_documentar = models.BooleanField(        default=False,        verbose_name='Puede documentar'    )
     requiere_cambio_password = models.BooleanField(
         default=False,
         verbose_name='Requiere cambio de contraseña'
